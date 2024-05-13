@@ -2,29 +2,19 @@ import time
 import hid
 
 
-def add_column(receive, title, index_last, which):
-    for i in range(index_last+1, 64):
-        receive[i] = 0
-
-    with open(f"default_{which}.csv") as f:
-        lines = f.read().strip().split("\n")
-
-    with open(f"default_{which}.csv", "w") as f:
-        f.write(f"{lines[0]},{title}")
-        for line, val in zip(lines[1:], receive[4:]):
-            if which == "hex":
-                val_str = f"{val:#04x}"
-            else:
-                val_str = str(val)
-            f.write(f"\n{line},{val_str}")
-
-
-def add_column2(receive, title, index_last):
-    for which in ["hex", "dec"]:
-        add_column(receive, title, index_last, which)
-
-
 class MCP2210():
+
+    @staticmethod
+    def find_MCP2210():
+        for device_dict in hid.enumerate():
+            if "MCP2210" in device_dict["product_string"]:
+                keys = list(device_dict.keys())
+                keys.sort()
+                info = ""
+                for key in keys:
+                    info += f"{key}: {device_dict[key]}\n"
+                return info.strip()
+        return "MCP2210 not found"
 
     def __init__(self):
         self.dev = hid.device()
@@ -360,6 +350,7 @@ class ERRORMSG():
 
 
 if __name__ == "__main__":
+    print(MCP2210.find_MCP2210())
     x = MCP2210()
     x.open()
     x.set_gpio_direction_all(0)
