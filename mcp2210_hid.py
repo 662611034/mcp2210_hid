@@ -2,6 +2,12 @@ import time
 import hid
 
 
+class DataBlock():
+
+    def __init__(self):
+        pass
+
+
 class MCP2210():
 
     @staticmethod
@@ -22,15 +28,28 @@ class MCP2210():
         self.init_para_chip()
 
     @staticmethod
-    def little_endian(data, bytelen):
-        cmd = [(data >> (8*i)) & 0xff for i in range(bytelen)]
-        return cmd
+    def big_endian(value, length):
+        return list(value.to_bytes(length, "big"))
+
+    @staticmethod
+    def de_big_endian(list_data):
+        data_byte = bytes(list_data)
+        return int.from_bytes(data_byte, "big")
+
+    @staticmethod
+    def little_endian(value, length):
+        return list(value.to_bytes(length, "little"))
+
+    @staticmethod
+    def de_little_endian(list_data):
+        data_byte = bytes(list_data)
+        return int.from_bytes(data_byte, "little")
 
     def init_para_chip(self):
         self.gpio_design = 8 * [0]  # GPIO:0, CS:1, func:2
         self.gp8_design = GP8Design.INPUT  # input:0, func:2
         self.gpio_out = 0xaa
-        self.gpio_direction = 0xff
+        self.gpio_direction = 0xff  # input: 1, output: 0
         self.remote_wakeup_enable = 1
         self.interrupt_mode = InterruptMode.COUNTFALLINGEDGE
         self.spi_bus_release_enable = 0
@@ -53,7 +72,7 @@ class MCP2210():
         # cmd += self.password[:8].encode()  # 19~26
         return cmd
 
-    def set_chip_pwrup(self):
+    def set_chip_setting_pwrup(self):
         cmd = [PwrUpCmd.SET, PwrUpSubCmd.CHIPSET, 0, 0]
         cmd += self.gen_chip_setting()
         receive = self.query(cmd)
@@ -65,7 +84,7 @@ class MCP2210():
             raise Exception(ERRORMSG.CMDUNMATCH)
         return self
 
-    def set_chip(self):
+    def set_chip_setting(self):
         cmd = [VMCmd.SETCHIPSET, 0, 0, 0]
         cmd += self.gen_chip_setting()[:14]
         receive = self.query(cmd)
@@ -74,14 +93,42 @@ class MCP2210():
         else:
             raise Exception(ERRORMSG.CMDUNMATCH)
 
+    def get_chip_setting_pwrup(self):
+        cmd = [PwrUpCmd.GET, PwrUpSubCmd.CHIPSET, 0, 0]
+        receive = self.query(cmd)
+        if receive[0:3] == cmd[0:1]+[0, 0x20]:
+            return self.analyze_chip_setting(receive)
+        else:
+            raise Exception(ERRORMSG.CMDUNMATCH)
+
+    def get_chip_setting(self):
+        cmd = [VMCmd.GETCHIPSET, 0, 0, 0]
+        receive = self.query(cmd)
+        if receive[0:2] == cmd[0:2]:
+            return self.analyze_chip_setting(receive)
+        else:
+            raise Exception(ERRORMSG.CMDUNMATCH)
+
+    def analyze_chip_setting(self, receive):
+        para_chip = DataBlock()
+        para_chip.gpio_design = receive[4:12]
+        para_chip.gp8_design = receive[12]
+        para_chip.gpio_out = receive[13]
+        para_chip.gpio_direction = receive[15]
+        para_chip.remote_wakeup_enable = (receive[17] >> 4) & 1
+        para_chip.interrupt_mode = (receive[17] >> 1) & 0b111
+        para_chip.spi_bus_release_enable = receive[17] & 1
+        para_chip.access_control = receive[18]
+        return para_chip
+
     def init_para_SPI(self):
-        self.bitrate = 12 * 10**6  # 15k~12M
+        self.bitrate = 3 * 10**6  # 1.5k~3M
         self.cs_idle = 0xff
         self.cs_active = 0x00
-        self.delay_cs_data = 1  # quanta of 100us
-        self.delay_data_cs = 1  # quanta of 100us
+        self.delay_cs_data = 0  # quanta of 100us
+        self.delay_data_cs = 0  # quanta of 100us
         self.delay_data_data = 0  # quanta of 100us
-        self.datalen = 32  # bytes
+        self.datalen_spi = 32  # bytes
         self.spimode = 0
 
         self.interval_retry = 0.005  # sec
@@ -96,11 +143,11 @@ class MCP2210():
         cmd += self.little_endian(self.delay_cs_data, 2)
         cmd += self.little_endian(self.delay_data_cs, 2)
         cmd += self.little_endian(self.delay_data_data, 2)
-        cmd += self.little_endian(self.datalen, 2)
+        cmd += self.little_endian(self.datalen_spi, 2)
         cmd += [self.spimode]  # 20
         return cmd
 
-    def set_SPI_pwrup(self):
+    def set_SPI_setting_pwrup(self):
         cmd = [PwrUpCmd.SET, PwrUpSubCmd.SPISET, 0, 0]
         cmd += self.gen_SPI_setting()
         receive = self.query(cmd)
@@ -113,18 +160,57 @@ class MCP2210():
         else:
             raise Exception(ERRORMSG.CMDUNMATCH)
 
-    def set_SPI(self):
+    def set_SPI_setting(self):
         cmd = [VMCmd.SETSPISET, 0, 0, 0]
         cmd += self.gen_SPI_setting()
         receive = self.query(cmd)
-        if receive[0:2] != cmd[0:2]:
-            raise Exception(ERRORMSG.CMDUNMATCH)
-        if receive[0:2] == [cmd[0], 0xf8]:
+        if receive[0:2] == cmd[0:2]:
+            return self
+        elif receive[0:2] == [cmd[0], 0xf8]:
             raise Exception(ERRORMSG.NOTWRITTEN)
-        return self
+        else:
+            raise Exception(ERRORMSG.CMDUNMATCH)
+
+    def get_SPI_setting_pwrup(self):
+        cmd = [PwrUpCmd.GET, PwrUpSubCmd.SPISET, 0, 0]
+        receive = self.query(cmd)
+        if receive[0:3] == cmd[0:1] + [0, 0x10]:
+            return self.analyze_SPI_setting(receive)
+        else:
+            raise Exception(ERRORMSG.CMDUNMATCH)
+
+    def get_SPI_setting(self):
+        cmd = [VMCmd.GETSPISET, 0, 0, 0]
+        receive = self.query(cmd)
+        if receive[0:3] == cmd[0:2]+[0x11]:
+            return self.analyze_SPI_setting(receive)
+        else:
+            raise Exception(ERRORMSG.CMDUNMATCH)
+
+    def analyze_SPI_setting(self, receive):
+        para_SPI = DataBlock()
+        para_SPI.bitrate = self.de_little_endian(receive[4:8])
+        para_SPI.cs_idle = receive[8]
+        para_SPI.cs_active = receive[10]
+        para_SPI.delay_cs_data = self.de_little_endian(
+                receive[12:14])
+        para_SPI.delay_data_cs = self.de_little_endian(
+                receive[14:16])
+        para_SPI.delay_data_data = self.de_little_endian(
+                receive[16:18])
+        para_SPI.datalen_spi = self.de_little_endian(receive[18:20])
+        para_SPI.spimode = receive[20]
+        return para_SPI
 
     def open(self):
         self.dev.open(1240, 222)
+        return self
+
+    def initiate(self):
+        self.init_para_chip()
+        self.init_para_SPI()
+        self.set_chip_setting()
+        self.set_SPI_setting()
         return self
 
     def close(self):
@@ -160,18 +246,20 @@ class MCP2210():
         cmd = [VMCmd.SETGPIODIRECTION]
         cmd += [0, 0, 0, direction]
         receive = self.query(cmd)
-        if receive[0:2] != cmd[0:2]:
+        if receive[0:2] == cmd[0:2]:
+            return self
+        else:
             raise Exception(ERRORMSG.CMDUNMATCH)
-        return self
 
     def get_gpio_direction_all(self):
         # input:1, output:0
         # MSB: GPIO7, LSB: GPIO0
         cmd = [VMCmd.GETGPIODIRECTION, 0]
         receive = self.query(cmd)
-        if receive[0:2] != cmd[0:2]:
+        if receive[0:2] == cmd[0:2]:
+            return receive[4] & 0xff
+        else:
             raise Exception(ERRORMSG.CMDUNMATCH)
-        return receive[4] & 0xff
 
     def set_gpio_direction(self, gpio: int, direction: int):
         # input:1, output:0
@@ -199,19 +287,20 @@ class MCP2210():
         cmd = [VMCmd.SETGPIOVALUE]
         cmd += [0, 0, 0, value]
         receive = self.query(cmd)
-        if receive[0:2] != cmd[0:2]:
+        if receive[0:2] == cmd[0:2]:
+            self.gpio_value_set = value
+            return receive[4] & 0xff  # GPIO Actual Value
+        else:
             raise Exception(ERRORMSG.CMDUNMATCH)
-        self.gpio_value_set = value
-        return receive[4] & 0xff  # GPIO Actual Value
 
     def get_gpio_value_all(self):
-        # input:1, output:0
         # MSB: GPIO7, LSB: GPIO0
         cmd = [VMCmd.GETGPIOVALUE, 0]
         receive = self.query(cmd)
-        if receive[0:2] != cmd[0:2]:
+        if receive[0:2] == cmd[0:2]:
+            return receive[4] & 0xff
+        else:
             raise Exception(ERRORMSG.CMDUNMATCH)
-        return receive[4] & 0xff
 
     def set_gpio_value(self, gpio: int, value: int):
         gpio &= 0x07
@@ -227,17 +316,29 @@ class MCP2210():
         return (value_actual >> gpio) & 0x01
 
     def get_gpio_value(self, gpio: int):
-        # input:1, output:0
         gpio &= 0x07
         value_current = self.get_gpio_value_all()
         return (value_current >> gpio) & 0x01
 
-    def transfer_spi(self, data):
+    def get_gpio_value_8(self):
+        cmd = [VMCmd.GETGPIOVALUE, 0]
+        receive = self.query(cmd)
+        if receive[0:2] == cmd[0:2]:
+            return receive[5] & 1
+        else:
+            raise Exception(ERRORMSG.CMDUNMATCH)
+
+    def xfer_spi_data(self, data):
+        if self.datalen_spi != len(data):
+            self.datalen_spi = len(data)
+            self.set_SPI_setting()
+
         data_send, data_rest = data[:60], data[60:]
         data_spi_rx = []
+
         while True:
             cmd = [SPICmd.TRANSFER, len(data_send), 0, 0]
-            cmd += self.convert_spi_data(data_send)
+            cmd += data_send
             receive = self.query(cmd)
 
             if receive[0:2] == [cmd[0], 0xf7]:  # RES1
@@ -250,13 +351,34 @@ class MCP2210():
                 data_send, data_rest = data_rest[:60], data_rest[60:]
                 if receive[3] == 0x10:  # RES5
                     data_spi_rx += receive[4:4+receive[2]]
-                    return data_spi_rx
+                    break
                 elif receive[3] == 0x20:  # RES2
                     continue
                 elif receive[3] == 0x30:  # RES4
                     data_spi_rx += receive[4:4+receive[2]]
                     continue
-            raise Exception(ERRORMSG.CMDUNMATCH)  # else
+            else:
+                raise Exception(ERRORMSG.CMDUNMATCH)  # else
+
+        if len(data) != len(data_spi_rx):
+            msg = "SPI send data lenght and receive length not equal"
+            raise Exception(msg)
+
+        return data_spi_rx
+
+    def xfer_spi(self, data, *chips, csmask=0xff):
+        if chips:
+            cs = 0
+            for chip in chips:
+                cs += 1 << chip
+            cs = (~cs) & 0xff
+        else:
+            cs = (~csmask) & 0xff
+
+        self.cs_active = cs
+        self.set_SPI_setting()
+
+        return self.xfer_spi_data(data)
 
 
 class PwrUpCmd():
@@ -304,8 +426,8 @@ class StatusCmd():
 
 
 class GPIODirection():
-    INPUT = 0
-    OUTPUT = 1
+    INPUT = 1
+    OUTPUT = 0
 
 
 class GPIOOutput():
@@ -342,20 +464,17 @@ class NVRAMAAccessCtrl():
 
 
 class ERRORMSG():
-    CMDUNMATCH = "Something wrong durin HID communication"
+    CMDUNMATCH = "Something wrong during HID communication"
     BLOCKEDACCESS = "Blocked Access.\n"
     BLOCKEDACCESS += "Password is wrong, "
-    BLOCKEDACCESS += "or the settings ar permanantely locked"
+    BLOCKEDACCESS += "or the settings are permanantely locked"
     NOTWRITTEN = "Settings not written"
 
 
 if __name__ == "__main__":
-    print(MCP2210.find_MCP2210())
     x = MCP2210()
     x.open()
-    x.set_gpio_direction_all(0)
-    for i in range(16):
-        x.set_gpio_value_all(i << 4)
-        time.sleep(0.2)
-
-    x.close()
+    x.gpio_design = 8*[1]
+    x.set_chip_setting()
+    x.set_gpio_direction_all(0xff)
+    print(x.xfer_spi([0xf, 0xf0], 4))
